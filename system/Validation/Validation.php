@@ -249,24 +249,18 @@ class Validation implements ValidationInterface
             ) {
                 $passed = true;
 
-                foreach ($rules as $rule) {
-                    if (preg_match('/(.*?)\[(.*)\]/', $rule, $match)) {
-                        $rule  = $match[1];
-                        $param = $match[2];
+                foreach ($rules as $key => $rule) {
+                    $ruleName = $rule;
+                    if (! is_string($ruleName)) {
+                        $ruleName = $key;
+                    }
 
-                        if (! in_array($rule, ['required_with', 'required_without'], true)) {
+                    if (preg_match('/(.*?)\[(.*)\]/', $ruleName)) {
+                        if (! in_array($ruleName, ['required_with', 'required_without'], true)) {
                             continue;
                         }
 
-                        // Check in our rulesets
-                        foreach ($this->ruleSetInstances as $set) {
-                            if (! method_exists($set, $rule)) {
-                                continue;
-                            }
-
-                            $passed = $passed && $set->{$rule}($value, $param, $data);
-                            break;
-                        }
+                        $passed = $passed && $this->processSingleRule($field, $label, $value, $rule, $data, $originalField, $ruleName);
                     }
                 }
 
@@ -275,80 +269,96 @@ class Validation implements ValidationInterface
                 }
             }
 
-            $rules = array_diff($rules, ['permit_empty']);
+            unset($rules[array_search('permit_empty', $rules, true)]);
         }
 
         foreach ($rules as $i => $rule) {
-            $isCallable = is_callable($rule);
-
-            $passed = false;
-            $param  = false;
-
-            if (! $isCallable && preg_match('/(.*?)\[(.*)\]/', $rule, $match)) {
-                $rule  = $match[1];
-                $param = $match[2];
-            }
-
-            // Placeholder for custom errors from the rules.
-            $error = null;
-
-            // If it's a callable, call and get out of here.
-            if ($this->isClosure($rule)) {
-                $passed = $rule($value, $data, $error, $field);
-            } elseif ($isCallable) {
-                $passed = $param === false ? $rule($value) : $rule($value, $param, $data);
-            } else {
-                $found = false;
-
-                // Check in our rulesets
-                foreach ($this->ruleSetInstances as $set) {
-                    if (! method_exists($set, $rule)) {
-                        continue;
-                    }
-
-                    $found  = true;
-                    $passed = $param === false
-                        ? $set->{$rule}($value, $error)
-                        : $set->{$rule}($value, $param, $data, $error, $field);
-
-                    break;
-                }
-
-                // If the rule wasn't found anywhere, we
-                // should throw an exception so the developer can find it.
-                if (! $found) {
-                    throw ValidationException::forRuleNotFound($rule);
-                }
-            }
-
-            // Set the error message if we didn't survive.
-            if ($passed === false) {
-                // if the $value is an array, convert it to as string representation
-                if (is_array($value)) {
-                    $value = $this->isStringList($value)
-                        ? '[' . implode(', ', $value) . ']'
-                        : json_encode($value);
-                } elseif (is_object($value)) {
-                    $value = json_encode($value);
-                }
-
-                $param = ($param === false) ? '' : $param;
-
-                // @phpstan-ignore-next-line $error may be set by rule methods.
-                $this->errors[$field] = $error ?? $this->getErrorMessage(
-                    $this->isClosure($rule) ? $i : $rule,
-                    $field,
-                    $label,
-                    $param,
-                    (string) $value,
-                    $originalField
-                );
-
+            if (! $this->processSingleRule($field, $label, $value, $rule, $data, $originalField, is_string($rule) ? $rule : $i)) {
                 return false;
             }
         }
 
         return true;
+    }
+
+    /**
+     * @throws ValidationException for rule not found
+     */
+    protected function processSingleRule(
+        string $field,
+        ?string $label,
+        mixed $value,
+        Closure|string $rule,
+        ?array $data,
+        ?string $originalField,
+        ?string $identifier = null
+    ): bool {
+        $isCallable = is_callable($rule);
+
+        $passed = false;
+        // Placeholder for custom errors from the rules.
+        $error = null;
+        $param = false;
+
+        if (! $isCallable && preg_match('/(.*?)\[(.*)\]/', $rule, $match)) {
+            $rule  = $match[1];
+            $param = $match[2];
+        }
+
+        // If it's a callable, call and get out of here.
+        if ($this->isClosure($rule)) {
+            $passed = $rule($value, $data, $error, $field);
+        } elseif ($isCallable) {
+            $passed = $param === false ? $rule($value) : $rule($value, $param, $data);
+        } else {
+            $found = false;
+
+            // Check in our rulesets
+            foreach ($this->ruleSetInstances as $set) {
+                if (! method_exists($set, $rule)) {
+                    continue;
+                }
+
+                $found  = true;
+                $passed = $param === false
+                    ? $set->{$rule}($value, $error)
+                    : $set->{$rule}($value, $param, $data, $error, $field);
+
+                break;
+            }
+
+            // If the rule wasn't found anywhere, we
+            // should throw an exception so the developer can find it.
+            if (! $found) {
+                throw ValidationException::forRuleNotFound($identifier ?: $rule);
+            }
+        }
+
+        // Set the error message if we didn't survive.
+        if ($passed === false) {
+            // if the $value is an array, convert it to as string representation
+            if (is_array($value)) {
+                $value = $this->isStringList($value)
+                    ? '[' . implode(', ', $value) . ']'
+                    : json_encode($value);
+            } elseif (is_object($value)) {
+                $value = json_encode($value);
+            }
+
+            $param = ($param === false) ? '' : $param;
+
+            // @phpstan-ignore-next-line $error may be set by rule methods.
+            $this->errors[$field] = $error ?? $this->getErrorMessage(
+                $identifier ?: (is_string($rule) ? $rule : '[closure, no identifier provided]'),
+                $field,
+                $label,
+                $param,
+                (string) $value,
+                $originalField
+            );
+        }
+
+        return $passed;
     }
 
     /**
